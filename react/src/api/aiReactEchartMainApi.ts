@@ -198,8 +198,9 @@ export function fetchMainCharts(startMs: number, endMs: number, filters?: MainOv
   return getJson<MainChartsDto>(url("charts", startMs, endMs, filters), signal);
 }
 
-export function fetchMainXView(startMs: number, endMs: number, signal?: AbortSignal): Promise<MainXViewEventDto[]> {
-  return getJson<MainXViewEventDto[]>(url("xview", startMs, endMs), signal);
+export function fetchMainXView(startMs: number, endMs: number, filters?: MainOverviewFilterParams, signal?: AbortSignal): Promise<MainXViewEventDto[]> {
+  // 20260916 추가: X-View Node/GPU/Worker 필터를 Spring API로 전달
+  return getJson<MainXViewEventDto[]>(url("xview", startMs, endMs, filters), signal);
 }
 
 export function fetchMainLiveStats(startMs: number, endMs: number, signal?: AbortSignal): Promise<MainLiveStatDto[]> {
@@ -211,9 +212,16 @@ export function fetchMainLiveStats(startMs: number, endMs: number, signal?: Abor
 // ===== 20260916 추가 시작 : Overview 하단 Table Chunk / Internal Runtime Error =====
 export interface MainTableChunkDto {
   hostname?: string; tableId?: number; databaseName?: string; schemaName?: string; tableName?: string;
-  compressedTableSizeByte?: number; uncompressedTableSizeByte?: number; savingsRate?: number; compressionRatio?: number; collectTime?: string;
+  compressedTableSizeByte?: number; uncompressedTableSizeByte?: number; savingsRate?: number; compressionRatio?: number;
+  pct90100?: number; pct8090?: number; pct7080?: number; pct6070?: number; pct5060?: number; pct4050?: number;
+  pct3040?: number; pct2030?: number; pct1020?: number; pct010?: number; pct090?: number;
+  noDeletionCnt?: number; someDeletionCnt?: number; allDeletionCnt?: number; deletionCount?: string; rechunk?: string; needsRechunk?: string;
+  collectTime?: string;
 }
-export interface MainInternalErrorPointDto { time?: string; errorCount?: number; }
+export interface MainInternalErrorPointDto {
+  hostname?: string; instanceId?: string; statementId?: number; connectionId?: number; queryEndTime?: string;
+  statement?: string; messageTypeId?: string; message?: string; errorType?: boolean;
+}
 export function fetchMainTableChunks(startMs:number,endMs:number,filters?:MainOverviewFilterParams,signal?:AbortSignal):Promise<MainTableChunkDto[]> {
   return getJson<MainTableChunkDto[]>(url("table-chunks",startMs,endMs,filters),signal);
 }

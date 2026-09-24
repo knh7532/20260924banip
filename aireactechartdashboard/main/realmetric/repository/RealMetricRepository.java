@@ -38,7 +38,7 @@ public class RealMetricRepository {
             " AND n.hostname IS NOT NULL AND d.gpu_id IS NOT NULL " +
             (hasText(hostname) ? " AND n.hostname = :hostname " : "") +
             (gpuId != null ? " AND d.gpu_id = :gpuId " : "") +
-            (giId != null ? " AND d.gi_id = :giId " : "") +
+            /* 20260916 추가: GPU 4개 그래프는 Worker/GI 선택과 무관하게 Node+GPU 단위 GI 평균 */
             " GROUP BY d.snapshot_time, n.hostname, d.gpu_id " +
             " ORDER BY d.snapshot_time ASC, n.hostname ASC, d.gpu_id ASC";
 
@@ -69,7 +69,7 @@ public class RealMetricRepository {
             " AND n.hostname IS NOT NULL " +
             (hasText(hostname) ? " AND n.hostname = :hostname " : "") +
             (gpuId != null ? " AND d.gpu_id = :gpuId " : "") +
-            (giId != null ? " AND d.gi_id = :giId " : "") +
+            /* 20260916 추가: 우측 GPU 요약도 Worker/GI 필터 미적용 */
             " GROUP BY n.hostname ORDER BY n.hostname ASC";
 
         MapSqlParameterSource p = params(startTime, endTime, hostname, gpuId, giId);

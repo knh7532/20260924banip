@@ -38,7 +38,7 @@ function buildSeries(points: RealMetricPointDto[], servers: RealMetricServerDto[
     for (const p of rows) { const i=xi.get(Date.parse(p.collectTime)); if(i!==undefined){const v=getter(p); values[i]=Number.isFinite(v)?v:null;} }
     const first=rows[0];
     // 20260916 추가: tooltip/범례 = Node(서버).Worker. GI 2개 평균이면 두 worker명을 '/'로 함께 표시
-    lines.push({ id, label:`${first.hostname}.${first.worker}`, colorKey:nodeColorKey(first.hostname), values });
+    lines.push({ id, label:`${first.hostname}.GPU ${first.gpuId}`, colorKey:nodeColorKey(first.hostname), values });
   }
   // 20260916 추가: hostname 조회구간 평균을 같은 색 점선으로 표시
   for (const s of servers) {
@@ -85,7 +85,7 @@ export function useCharts(filters:Filters, rangeSec:number, refreshSec:number, s
     const startMs=ss ?? endMs-rs*PAN_FACTOR*1000;
     // ===== 20260916 추가 시작 : GPU 실측 + Worker Log 타임라인 동시 조회 =====
     const [body, mainCharts]=await Promise.all([
-      fetchRealMetrics(startMs,endMs,{instances:f.instances,gpus:f.gpus,migs:f.migs},signal),
+      fetchRealMetrics(startMs,endMs,{instances:f.instances,gpus:f.gpus},signal),
       fetchMainCharts(startMs,endMs,{instances:f.instances,gpus:f.gpus,migs:f.migs},signal),
     ]);
     const pts=body.points??[], sv=body.servers??[];

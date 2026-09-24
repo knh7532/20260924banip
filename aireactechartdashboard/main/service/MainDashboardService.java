@@ -22,7 +22,10 @@ public class MainDashboardService {
     public MainOverviewChartResponseDto charts(String start, String end, String hostname, String gpuId, String giId) {
         return repository.findCharts(t(start), t(end), hostname, gpuId, giId);
     }
-    public List<MainOverviewXViewEventDto> xview(String start, String end) { return repository.findXView(t(start), t(end)); }
+    public List<MainOverviewXViewEventDto> xview(String start, String end, String hostname, String gpuId, String giId) {
+        // 20260916 추가: X-View 상단 필터 전달
+        return repository.findXView(t(start), t(end), hostname, gpuId, giId);
+    }
     public List<MainOverviewLiveStatDto> liveStats(String start, String end) { return repository.findLiveStats(t(start), t(end)); }
     // ===== 20260916 추가 시작 : Overview 하단 Table Chunk / Internal Runtime Error =====
     public List<MainTableChunkDto> tableChunks(String start, String end, String hostname) {

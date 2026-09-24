@@ -24,12 +24,9 @@ export function useXViewEvents(
     const endMs = se ?? (Math.floor(Date.now() / 1000) * 1000);
     const startMs = ss ?? (endMs - rs * PAN_FACTOR * 1000);
     // ===== 20260908 추가 끝 : Overview X-View 선택 조회기간 사용 =====
-    const rows = await fetchMainXView(startMs, endMs, signal);
-    const selected = rows.filter((r) => {
-      if (f.instances.length && !f.instances.includes(r.node)) return false;
-      if (f.gpus.length && r.gpu && !f.gpus.includes(r.gpu)) return false;
-      return true;
-    }).map((r) => ({
+    const rows = await fetchMainXView(startMs, endMs, { instances:f.instances, gpus:f.gpus, migs:f.migs }, signal);
+    // 20260916 추가: 필터는 백엔드 SQL에서 적용
+    const selected = rows.map((r) => ({
       ...r,
       endMs: Number(r.endMs),
       durationSec: Number(r.durationSec),

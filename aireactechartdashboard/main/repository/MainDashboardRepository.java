@@ -159,8 +159,8 @@ public class MainDashboardRepository {
                         " SELECT DISTINCT ON (server_id,connection_id,statement_id)" +
                         "        server_id,hostname,connection_id,statement_id,statement_status,collect_time" +
                         " FROM public.ax_metrics_sqream_server_status" +
-                        " WHERE collect_time BETWEEN CAST(:startTime AS timestamp) AND CAST(:endTime AS timestamp)" +
-                        "   AND statement_id IS NOT NULL" +
+                        // ===== 20260916 추가 : server_status는 조회기간과 무관한 실시간 최신 상태 =====
+                        " WHERE statement_id IS NOT NULL" +
                         "   AND (COALESCE(CAST(:hostnames AS varchar),'')='' OR hostname = ANY(string_to_array(CAST(:hostnames AS varchar), ',')))" +
                         " ORDER BY server_id,connection_id,statement_id,collect_time DESC" +
                         ") SELECT" +
@@ -180,45 +180,65 @@ public class MainDashboardRepository {
         kpi.stoppingStatements = dbl(status.get("stopping"));
         // ===== 20260908 추가 끝 : 대기/준비/초기화/실행중/중단 =====
 
-        // ===== 20260908 추가 시작 : 실행 중인 SQream DB 쿼리 - MQuery 직접 매핑 =====
-        String rowsSql = overviewMQueryCte() +
-                "SELECT * FROM mquery ORDER BY query_start_time DESC,statement_id DESC";
+        // ===== 20260916 추가 시작 : 실행 중 쿼리는 server_status 최신 수집값을 refresh 주기마다 조회 =====
+        // 조회기간(startTime/endTime)은 적용하지 않는다. 5/10/30초는 React polling 주기일 뿐이다.
+        String rowsSql =
+                "WITH latest_status AS (" +
+                " SELECT DISTINCT ON (ss.server_id,ss.connection_id,ss.statement_id) ss.*" +
+                " FROM public.ax_metrics_sqream_server_status ss" +
+                " WHERE ss.statement_id IS NOT NULL" +
+                "   AND (COALESCE(CAST(:hostnames AS varchar),'')='' OR ss.hostname = ANY(string_to_array(CAST(:hostnames AS varchar), ',')))" +
+                " ORDER BY ss.server_id,ss.connection_id,ss.statement_id,ss.collect_time DESC" +
+                ") SELECT ss.*," +
+                " dcm.gpu_id,dcm.gi_id,dcm.gr_engine_active_percent,dcm.memory_used_mib,dcm.memory_total_mib," +
+                " nm.cpu_usage_percent,nm.memory_used_bytes" +
+                " FROM latest_status ss" +
+                " LEFT JOIN LATERAL (" +
+                "   SELECT d.gpu_id,d.gi_id,(d.gr_engine_active_percent * 100.0) AS gr_engine_active_percent," +
+                "          d.memory_used_mib,d.memory_total_mib" +
+                "   FROM public.ax_metrics_gpu_dcgmi_metric d" +
+                "   JOIN public.ax_metrics_gpu_nvidia_smi_info nsi ON nsi.id=d.nvidia_smi_id" +
+                "   WHERE nsi.hostname=ss.hostname" +
+                "     AND ('sqream' || CASE WHEN nsi.hostname ~ 'gpu[0-9]+$' THEN substring(nsi.hostname from '([0-9])$') ELSE '4' END" +
+                "          || d.gpu_id::text || d.gi_id::text)=ss.instance_id" +
+                "     AND d.snapshot_time <= ss.collect_time" +
+                "   ORDER BY d.snapshot_time DESC LIMIT 1" +
+                " ) dcm ON TRUE" +
+                " LEFT JOIN LATERAL (" +
+                "   SELECT n.cpu_usage_percent,n.memory_used_bytes" +
+                "   FROM public.ax_metrics_node n WHERE n.hostname=ss.hostname AND n.collect_time <= ss.collect_time" +
+                "   ORDER BY n.collect_time DESC LIMIT 1" +
+                " ) nm ON TRUE" +
+                " WHERE (COALESCE(CAST(:gpuIds AS varchar),'')='' OR dcm.gpu_id = ANY(string_to_array(CAST(:gpuIds AS varchar), ',')::integer[]))" +
+                "   AND (COALESCE(CAST(:migInstanceIds AS varchar),'')='' OR dcm.gi_id = ANY(string_to_array(CAST(:migInstanceIds AS varchar), ',')::integer[]))" +
+                " ORDER BY ss.statement_start_time DESC NULLS LAST,ss.statement_id DESC";
         for (Map<String,Object> r : jdbc.queryForList(rowsSql,p)) {
             MainOverviewStatementDto d = new MainOverviewStatementDto();
             d.stmtId = str(r.get("statement_id"));
-            d.queryId = !str(r.get("global_uuid")).isEmpty() ? str(r.get("global_uuid")) : str(r.get("log_id"));
+            d.queryId = str(r.get("global_uuid"));
             d.user = str(r.get("user_id"));
             d.node = str(r.get("hostname"));
             d.gpu = str(r.get("gpu_id"));
-            d.mig = str(r.get("mig_instance_id"));
-            d.worker = !str(r.get("worker_hostname")).isEmpty() ? str(r.get("worker_hostname")) : str(r.get("mig_instance_id"));
-            d.service = str(r.get("service_name"));
-            d.qid = d.queryId;
-            d.qidTags = "";
+            d.mig = str(r.get("gi_id"));
+            d.worker = str(r.get("instance_id"));
+            d.service = str(r.get("service"));
+            d.qid = d.queryId; d.qidTags = "";
             d.connectionId = str(r.get("connection_id"));
-            d.memoryBytes = dbl(r.get("peak_memory_used_bytes"));
+            d.memoryBytes = dbl(r.get("memory_used_bytes"));
             d.gpuPct = dbl(r.get("gr_engine_active_percent"));
-            d.cpuPct = dbl(r.get("peak_cpu_usage_percent"));
-            d.startTimeSec = epochSec(r.get("query_start_time"));
-            Long execMs = lng(r.get("query_execution_time_ms"));
-            d.elapsedSec = execMs == null ? null : execMs / 1000.0;
-            d.progress = 1.0;
-            d.spoolBytes = null;
+            d.cpuPct = dbl(r.get("cpu_usage_percent"));
+            d.startTimeSec = epochSec(r.get("statement_start_time"));
+            Object statusStart = r.get("statement_status_start");
+            if (statusStart instanceof java.sql.Timestamp) {
+                d.elapsedSec = Math.max(0.0, (System.currentTimeMillis() - ((java.sql.Timestamp) statusStart).getTime()) / 1000.0);
+            } else { d.elapsedSec = null; }
+            d.progress = null; d.spoolBytes = null;
             Double memMib = dbl(r.get("memory_used_mib"));
             d.vramBytes = memMib == null ? null : memMib * 1024.0 * 1024.0;
             d.lockHeldSec = null;
             result.statements.add(d);
-
-            MainOverviewPerformanceDto perf = new MainOverviewPerformanceDto();
-            perf.queryName = "Statement " + d.stmtId;
-            perf.queryType = str(r.get("sql_type"));
-            perf.database = str(r.get("database_name"));
-            perf.node = d.node; perf.gpu = d.gpu; perf.mig = d.mig;
-            perf.p95Seconds = d.elapsedSec;
-            perf.state = 1;
-            result.performance.add(perf);
         }
-        // ===== 20260908 추가 끝 : 실행 중인 SQream DB 쿼리 - MQuery 직접 매핑 =====
+        // ===== 20260916 추가 끝 : server_status 실시간 실행 쿼리 =====
 
         result.servers = findLatestServers(endTime);
         int migTotal = 0, migActive = 0;
@@ -656,43 +676,67 @@ public class MainDashboardRepository {
         MapSqlParameterSource p = new MapSqlParameterSource()
                 .addValue("startTime", startTime).addValue("endTime", endTime).addValue("hostname", hostname);
         String sql =
-                "SELECT DISTINCT ON (table_id) hostname,table_id,database_name,schema_name,table_name," +
-                " compressed_table_size_byte,uncompressed_table_size_byte,savings_rate,compression_ratio,collect_time" +
+                "SELECT * FROM (" +
+                " SELECT DISTINCT ON (table_id) hostname,table_id,database_name,schema_name,table_name," +
+                " compressed_table_size_byte,uncompressed_table_size_byte,savings_rate,compression_ratio," +
+                " pct_90_100,pct_80_90,pct_70_80,pct_60_70,pct_50_60,pct_40_50,pct_30_40,pct_20_30,pct_10_20,pct_0_10," +
+                " no_deletion_cnt,some_deletion_cnt,all_deletion_cnt,collect_time" +
                 " FROM public.ax_metrics_sqream_chunk" +
                 " WHERE collect_time BETWEEN CAST(:startTime AS timestamp) AND CAST(:endTime AS timestamp)" +
                 "   AND (COALESCE(CAST(:hostname AS varchar),'')='' OR hostname = ANY(string_to_array(CAST(:hostname AS varchar), ',')))" +
-                " ORDER BY table_id,collect_time DESC";
+                " ORDER BY table_id,collect_time DESC" +
+                ") latest ORDER BY uncompressed_table_size_byte DESC, table_name ASC";
         List<MainTableChunkDto> out = new ArrayList<>();
         for (Map<String,Object> r : jdbc.queryForList(sql,p)) {
             MainTableChunkDto d = new MainTableChunkDto();
             d.hostname = str(r.get("hostname")); d.tableId = lng(r.get("table_id"));
             d.databaseName = str(r.get("database_name")); d.schemaName = str(r.get("schema_name")); d.tableName = str(r.get("table_name"));
             d.compressedTableSizeByte = lng(r.get("compressed_table_size_byte")); d.uncompressedTableSizeByte = lng(r.get("uncompressed_table_size_byte"));
-            d.savingsRate = dbl(r.get("savings_rate")); d.compressionRatio = dbl(r.get("compression_ratio")); d.collectTime = timeText(r.get("collect_time"));
+            d.savingsRate = dbl(r.get("savings_rate")); d.compressionRatio = dbl(r.get("compression_ratio"));
+            d.pct90100 = lng(r.get("pct_90_100")); d.pct8090 = lng(r.get("pct_80_90")); d.pct7080 = lng(r.get("pct_70_80"));
+            d.pct6070 = lng(r.get("pct_60_70")); d.pct5060 = lng(r.get("pct_50_60")); d.pct4050 = lng(r.get("pct_40_50"));
+            d.pct3040 = lng(r.get("pct_30_40")); d.pct2030 = lng(r.get("pct_20_30")); d.pct1020 = lng(r.get("pct_10_20")); d.pct010 = lng(r.get("pct_0_10"));
+            d.pct090 = (d.pct8090 == null ? 0L : d.pct8090) + (d.pct7080 == null ? 0L : d.pct7080) + (d.pct6070 == null ? 0L : d.pct6070) + (d.pct5060 == null ? 0L : d.pct5060) + (d.pct4050 == null ? 0L : d.pct4050) + (d.pct3040 == null ? 0L : d.pct3040) + (d.pct2030 == null ? 0L : d.pct2030) + (d.pct1020 == null ? 0L : d.pct1020) + (d.pct010 == null ? 0L : d.pct010);
+            d.noDeletionCnt = lng(r.get("no_deletion_cnt")); d.someDeletionCnt = lng(r.get("some_deletion_cnt")); d.allDeletionCnt = lng(r.get("all_deletion_cnt"));
+            boolean needs = (d.noDeletionCnt == null ? 0L : d.noDeletionCnt) + (d.someDeletionCnt == null ? 0L : d.someDeletionCnt) + (d.allDeletionCnt == null ? 0L : d.allDeletionCnt) > 0;
+            d.deletionCount = needs ? "YES" : "NO";
+            // DDL에 rechunk/needs_rechunk 실컬럼이 없으므로 현재는 deletion count 판정값과 동일하게 표시
+            d.rechunk = d.deletionCount; d.needsRechunk = d.deletionCount;
+            d.collectTime = timeText(r.get("collect_time"));
             out.add(d);
         }
         return out;
     }
     // ===== 20260916 추가 끝 : Overview 하단 Table Chunk =====
 
-    // ===== 20260916 추가 시작 : Overview 하단 Internal Runtime Error =====
+    // ===== 20260916 추가 시작 : Overview 하단 Internal Runtime Error - worker_log message_type_id 이벤트 =====
     public List<MainInternalErrorPointDto> findInternalErrors(LocalDateTime startTime, LocalDateTime endTime, String hostname) {
         MapSqlParameterSource p = new MapSqlParameterSource()
                 .addValue("startTime", startTime).addValue("endTime", endTime).addValue("hostname", hostname);
         String sql =
-                "SELECT date_trunc('minute',COALESCE(\"timestamp\",collect_time)) AS bucket_time,COUNT(*) AS error_count" +
+                "SELECT hostname,instance_id,statement_id,connection_id,query_end_time,\"statement\",message_type_id,message," +
+                " CASE WHEN trim(COALESCE(message_type_id,'')) IN ('20','21','500','1010') THEN true ELSE false END AS error_type" +
                 " FROM public.ax_metrics_sqream_worker_log" +
-                " WHERE COALESCE(\"timestamp\",collect_time) BETWEEN CAST(:startTime AS timestamp) AND CAST(:endTime AS timestamp)" +
+                " WHERE query_end_time BETWEEN CAST(:startTime AS timestamp) AND CAST(:endTime AS timestamp)" +
                 "   AND (COALESCE(CAST(:hostname AS varchar),'')='' OR hostname = ANY(string_to_array(CAST(:hostname AS varchar), ',')))" +
-                "   AND (lower(COALESCE(message_type,'')) LIKE '%error%' OR COALESCE(message_type,'') LIKE '%500%')" +
-                " GROUP BY date_trunc('minute',COALESCE(\"timestamp\",collect_time)) ORDER BY bucket_time";
+                " ORDER BY CASE WHEN trim(COALESCE(message_type_id,'')) IN ('20','21','500','1010') THEN 0 ELSE 1 END," +
+                "          query_end_time ASC, hostname ASC";
         List<MainInternalErrorPointDto> out = new ArrayList<>();
         for (Map<String,Object> r : jdbc.queryForList(sql,p)) {
             MainInternalErrorPointDto d = new MainInternalErrorPointDto();
-            d.time = timeText(r.get("bucket_time")); d.errorCount = lng(r.get("error_count")); out.add(d);
+            d.hostname = str(r.get("hostname"));
+            d.instanceId = str(r.get("instance_id"));
+            d.statementId = lng(r.get("statement_id"));
+            d.connectionId = lng(r.get("connection_id"));
+            d.queryEndTime = timeText(r.get("query_end_time"));
+            d.statement = str(r.get("statement"));
+            d.messageTypeId = str(r.get("message_type_id"));
+            d.message = str(r.get("message"));
+            d.errorType = Boolean.TRUE.equals(r.get("error_type"));
+            out.add(d);
         }
         return out;
     }
-    // ===== 20260916 추가 끝 : Overview 하단 Internal Runtime Error =====
+    // ===== 20260916 추가 끝 : Overview 하단 Internal Runtime Error - worker_log message_type_id 이벤트 =====
 
 }

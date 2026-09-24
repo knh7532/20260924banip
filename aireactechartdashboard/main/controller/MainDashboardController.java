@@ -28,8 +28,11 @@ public class MainDashboardController {
     }
 
     @GetMapping("/xview")
-    public List<MainOverviewXViewEventDto> xview(@RequestParam String startTime, @RequestParam String endTime) {
-        return service.xview(startTime, endTime);
+    public List<MainOverviewXViewEventDto> xview(@RequestParam String startTime, @RequestParam String endTime,
+            @RequestParam(required=false) String hostname, @RequestParam(required=false) String gpuId,
+            @RequestParam(required=false) String giId) {
+        // 20260916 추가: X-View도 상단 Node/GPU/Worker 필터 연동
+        return service.xview(startTime, endTime, hostname, gpuId, giId);
     }
 
     @GetMapping("/live-stats")
